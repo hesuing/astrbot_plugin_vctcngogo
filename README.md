@@ -8,7 +8,7 @@ VCT CN（无畏契约中国赛区）比赛播报插件，适用于 [AstrBot](htt
 
 - 手动查询当日赛程、全部赛程、历史比赛结果
 - 查询单场比赛详细数据：总比分、每图地图名、半场攻防、选手排行（Rating 2.0 / ACS / KDA / 英雄）、每图 MVP
-- 定时自动监控：比赛开赛后逐图播报结果（含每图 MVP），整场结束后播报总结
+- 定时自动监控：开赛提醒、比赛进行中实时比分播报、逐图播报结果（含每图 MVP）、整场结束后播报总结
 - 错过直播的比赛自动补发完整总结
 - 首次启动自动标记已有历史比赛，不会刷屏补发
 - 播报状态持久化，重启不重复播报
@@ -16,14 +16,24 @@ VCT CN（无畏契约中国赛区）比赛播报插件，适用于 [AstrBot](htt
 
 ## 安装
 
-方法一：AstrBot 面板安装（推荐）
-方法二：手动 clone 到插件目录
+本插件通过 Git 安装，仓库根目录即插件目录。
 
-cd /AstrBot/data/plugins/
-git clone https://github.com/hesuing/astrbot_plugin_vctcngogo
-.git
+### 方式一：AstrBot 面板安装（推荐）
 
-> 注意：请把 `astrbot_plugin_vct_cn` 文件夹整体放入插件目录，不要只把里面的文件散放进去。
+1. 打开 AstrBot 管理面板 → 「插件管理」
+2. 点击「安装」→ 填入 Git 仓库地址：`https://github.com/hesuing/astrbot_plugin_vctcngogo`
+3. 安装完成后重启 AstrBot，插件自动加载
+
+### 方式二：命令行手动克隆
+
+```bash
+cd /AstrBot/data/plugins
+git clone https://github.com/hesuing/astrbot_plugin_vctcngogo astrbot_plugin_vct_cn
+```
+
+然后重启 AstrBot。
+
+> 注意：`astrbot_plugin_vct_cn` 文件夹整体即插件目录，请勿只把里面的文件散放进去。
 
 无第三方依赖，仅使用 Python 标准库及 AstrBot 内置组件。
 
@@ -67,9 +77,13 @@ https://www.vlr.gg/701025/wolves-esports-vs-titan-esports-club-...
 
 配置 `target_sessions`（或发送 `/vct bind` 绑定当前会话）后，插件定时任务会自动：
 
+> 提示：插件重启后请在播报目标群里随便发一条 `/vct` 命令，即可激活该群的自动播报能力（事件对象随命令刷新）。
+
 1. 每 `poll_interval_min` 分钟检查一次赛程
-2. 对 24 小时内开赛的比赛，每张图打完后自动推送该图结果（地图名、双方比分、半场攻防、本图 MVP）
-3. 整场比赛结束后自动推送总结（总比分 + 每图比分 + 每图 MVP）
+2. 对临近开赛（60 分钟内）的比赛推送开赛提醒
+3. 对进行中的比赛，比分变化时推送实时比分（总比分局数 + 每图比分）
+4. 每张图打完后自动推送该图结果（地图名、双方比分、半场攻防、本图 MVP）
+5. 整场比赛结束后自动推送总结（总比分 + 每图比分 + 每图 MVP）
 
 ## 配置
 
@@ -78,7 +92,7 @@ https://www.vlr.gg/701025/wolves-esports-vs-titan-esports-club-...
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `target_sessions` | list | `[]` | 定时播报目标会话列表（可用 `/vct bind` 动态添加）；留空则仅手动查询 |
-| `poll_interval_min` | int | `60` | 定时自动播报的检查间隔（分钟） |
+| `poll_interval_min` | int | `30` | 定时自动播报的检查间隔（分钟） |
 
 ## 播报内容示例
 
@@ -91,6 +105,26 @@ WOL（Wolves Esports） 2 : 0 TEC（Titan Esports Club）
 
 ■ 日落之城: Wolves Esports 13 : 5 Titan Esports Club  (WOL 胜, MVP Deryeon (幽影) 1.92 / 397 / 28-11-8)
 ■ 霓虹町: Wolves Esports 13 : 10 Titan Esports Club  (WOL 胜, MVP yosemite (奇乐) 1.32 / 243 / 20-13-2)
+```
+
+进行中比赛实时比分：
+
+```
+VCT 2026 中国赛区 Stage 2 · 比赛进行中
+TYLOO 2 : 0 TEC（Titan Esports Club）
+■ 日落之城: TYLOO 13 : 5 TEC (已结束)
+■ 霓虹町: TYLOO 10 : 4 TEC (已结束)
+■ 亚海悬城: TYLOO 0 : 0 TEC (进行中)
+```
+
+开赛提醒：
+
+```
+VCT 2026 中国赛区 Stage 2 · 即将开赛
+TYLOO vs TEC
+2026年8月14日 下午7:00
+约 30 分钟后开赛
+[半决赛]
 ```
 
 比赛详情：
@@ -120,3 +154,19 @@ astrbot_plugin_vct_cn/
 ├── _conf_schema.json    # 插件配置项定义
 └── monitor_state.json   # 运行时状态（自动生成，勿手动改动）
 ```
+
+## 版本记录
+
+- **v1.2.0**
+  - 新增开赛提醒：临近开赛（60 分钟内）自动播报对阵 / 时间 / 阶段
+  - 新增进行中比赛实时比分播报：比分变化时推送总比分局数与每图比分
+  - 支持识别 LIVE 进行中比赛（赛程、详情、实时监控）
+  - 修复 LIVE 比赛单图 `teams` 缺队导致的崩溃，MVP / 选手排行改为无 Rating 时按击杀排序
+  - 修复进行中比赛详情页地图比分 / 半场解析错误
+  - 修复定时播报无法发送的问题：改为事件对象主动发送，任意 `/vct` 命令即可激活当前群的自动播报；启动时立即执行一次首检（不等待满一个间隔）
+  - 定时检查间隔默认改为 30 分钟
+- **v1.1.0**
+  - 新增 `/vct match` 比赛详情查询（地图、半场、选手数据、每图 MVP）
+  - 新增自动监控：逐图播报 + 整场总结（每图 MVP）
+  - 新增首次启动保护与状态持久化
+  - 修复 `/vct`（无参数）误返回今日赛程的问题，现返回指令帮助

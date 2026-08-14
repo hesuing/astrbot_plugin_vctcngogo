@@ -8,7 +8,7 @@
   "poll_interval_min": {
     "description": "定时自动播报的检查间隔（分钟）。",
     "type": "int",
-    "hint": "默认 60",
-    "default": 60
+    "hint": "默认 30",
+    "default": 30
   }
 }

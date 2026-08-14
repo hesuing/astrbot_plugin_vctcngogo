@@ -10,6 +10,8 @@ from datetime import datetime
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
+from astrbot.core.message.components import Plain
+from astrbot.core.message.message_event_result import MessageChain
 
 try:
     from .match_parser import fetch_match_details
@@ -272,25 +274,32 @@ def _fmt_match(match: dict) -> str:
 
 
 def _game_players(game: dict) -> list:
-    """按 rating 降序返回选手列表（含中文角色）。"""
+    """按 rating 降序返回选手列表（含中文角色）；无 rating 时按击杀降序。"""
     ps = list(game.get("players") or [])
-    ps.sort(key=lambda p: p.get("rating", 0), reverse=True)
+    has_rating = any((p.get("rating") or 0) > 0 for p in ps)
+    key = (lambda p: p.get("rating", 0)) if has_rating else (lambda p: p.get("kills", 0))
+    ps.sort(key=key, reverse=True)
     return ps
 
 
 def _fmt_player_line(p: dict) -> str:
-    return (
-        f"{p.get('name','?')} ({_cn_agent(p.get('agent'))}) "
-        f"{p.get('rating',0):.2f} / {p.get('acs',0)} / "
-        f"{p.get('kills',0)}-{p.get('deaths',0)}-{p.get('assists',0)}"
-    )
+    line = f"{p.get('name','?')} ({_cn_agent(p.get('agent'))}) "
+    rating = p.get("rating", 0) or 0
+    acs = p.get("acs", 0) or 0
+    if rating > 0:
+        line += f"{rating:.2f} / {acs} / "
+    line += f"{p.get('kills',0)}-{p.get('deaths',0)}-{p.get('assists',0)}"
+    return line
 
 
 def _game_mvp(game: dict) -> dict | None:
     ps = game.get("players") or []
     if not ps:
         return None
-    return max(ps, key=lambda p: p.get("rating", 0))
+    rated = [p for p in ps if (p.get("rating") or 0) > 0]
+    pool = rated if rated else ps
+    key = (lambda p: p.get("rating", 0)) if rated else (lambda p: p.get("kills", 0))
+    return max(pool, key=key)
 
 
 def _format_game_report(game: dict) -> str:
@@ -319,6 +328,64 @@ def _format_game_report(game: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_starting_report(match: dict) -> str:
+    """开赛提醒：比赛即将开始时播报。"""
+    teams = match.get("teams") or []
+    if len(teams) < 2:
+        return ""
+    t1, t2 = teams[0], teams[1]
+    header = f"{EVENT_NAME} · 即将开赛"
+    eta_h = _eta_hours(match.get("eta"))
+    eta_txt = ""
+    if eta_h is not None:
+        if eta_h < 1:
+            eta_txt = f"约 {max(1, int(round(eta_h * 60)))} 分钟后开赛"
+        else:
+            h = int(eta_h)
+            m = int(round((eta_h - h) * 60))
+            eta_txt = f"约 {h} 小时{m} 分钟后开赛"
+    lines = [
+        header,
+        f"{_team_display(t1['name'])} vs {_team_display(t2['name'])}",
+    ]
+    dt = ""
+    if match.get("date"):
+        dt = _cn_date(match["date"]) + " " + _cn_time(match.get("time") or "")
+    if dt:
+        lines.append(dt)
+    if eta_txt:
+        lines.append(eta_txt)
+    if match.get("series"):
+        lines.append(f"[{_cn_series(match['series'])}]")
+    return "\n".join(lines)
+
+
+def _format_live_score(match: dict, games: list[dict]) -> str:
+    """进行中比赛实时比分：总比分局数 + 当前进行中地图比分。"""
+    teams = match.get("teams") or []
+    t1 = teams[0]["name"] if teams else ""
+    t2 = teams[1]["name"] if len(teams) > 1 else ""
+    map_wins = {}
+    for g in games:
+        if g.get("winner"):
+            map_wins[g["winner"]] = map_wins.get(g["winner"], 0) + 1
+    w1 = map_wins.get(t1, 0)
+    w2 = map_wins.get(t2, 0)
+    header = (
+        f"{EVENT_NAME} · 比赛进行中\n"
+        f"{_team_display(t1)} {w1} : {w2} {_team_display(t2)}"
+    )
+    lines = [header]
+    for g in games:
+        t1n, t2n = _teams2(g)
+        s1 = (g.get("scores") or {}).get(t1n, {}).get("total", 0)
+        s2 = (g.get("scores") or {}).get(t2n, {}).get("total", 0)
+        mname = g.get("map_cn") or g.get("map") or "?"
+        done = "已结束" if _game_done(g) else "进行中"
+        lines.append(f"■ {mname}: {_team_short(t1n)} {s1} : {s2} {_team_short(t2n)} ({done})")
+    return "\n".join(lines)
+
+
 def _format_final_report(match: dict, games: list[dict]) -> str:
     """整场结束播报：总比分 + 每图比分 + 每图 MVP。"""
     teams = match.get("teams") or []
@@ -338,7 +405,7 @@ def _format_final_report(match: dict, games: list[dict]) -> str:
         return "\n".join(lines)
     lines.append("")
     for g in games:
-        t1n, t2n = (g.get("teams") or ["", ""])[:2]
+        t1n, t2n = _teams2(g)
         s1 = (g.get("scores") or {}).get(t1n, {})
         s2 = (g.get("scores") or {}).get(t2n, {})
         mvp = _game_mvp(g)
@@ -359,6 +426,14 @@ def _game_done(g: dict) -> bool:
     return bool(g.get("winner"))
 
 
+def _teams2(g: dict) -> tuple[str, str]:
+    """安全解包比赛 teams，长度不足时补空串。"""
+    ts = g.get("teams") or []
+    t1 = ts[0] if len(ts) > 0 else ""
+    t2 = ts[1] if len(ts) > 1 else ""
+    return t1, t2
+
+
 _HELP_TEXT = (
     "用法:\n"
     "/vct today 今日赛程与即将开始的比赛\n"
@@ -376,7 +451,7 @@ _HELP_TEXT = (
     "astrbot_plugin_vct_cn",
     "qaqxi",
     "VCT CN 无畏契约中国赛区比赛播报（赛程 / 比分 / 详情 / 实时监控）",
-    "1.1.0",
+    "1.2.0",
     "",
 )
 class VctCnPlugin(Star):
@@ -389,9 +464,17 @@ class VctCnPlugin(Star):
             os.path.dirname(os.path.abspath(__file__)), "monitor_state.json"
         )
         self._state = self._load_state()
+        self._bound_events: dict[str, AstrMessageEvent] = {}
 
     async def initialize(self):
         await self._setup_scheduler()
+        # 启动后立即执行一次首检，避免等待满一个间隔才有反应
+        import asyncio as _asyncio
+
+        try:
+            _asyncio.create_task(self._auto_broadcast())
+        except Exception as _e:  # noqa: BLE001
+            logger.error("[vct_cn] 首检任务启动失败: %s", _e)
         logger.info("[vct_cn] 插件初始化完成")
 
     # ---------- 状态持久化 ----------
@@ -469,14 +552,78 @@ class VctCnPlugin(Star):
     async def _send(self, text: str) -> bool:
         if not text:
             return False
+        chain = MessageChain(chain=[Plain(text)])
         any_sent = False
         for session_id in await self._target_sessions():
+            event = self._bound_events.get(session_id)
             try:
-                await self.context.send_message(session_id, text)
+                if event is not None:
+                    await event.send(chain)
+                else:
+                    await self.context.send_message(session_id, text)
                 any_sent = True
             except Exception as e:  # noqa: BLE001
                 logger.error("[vct_cn] 播报到 %s 失败: %s", session_id, e)
         return any_sent
+
+    async def _notify_starting(self, matches: list[dict]):
+        """开赛提醒：距离开赛 <= TRIGGER_MINUTES 分钟且未提醒过的比赛播报一次。"""
+        notified = self._state.setdefault("starting_notified", {})
+        for m in matches:
+            mid = m.get("match_id")
+            if not mid or m.get("status") != "Upcoming":
+                continue
+            eta_h = _eta_hours(m.get("eta"))
+            if eta_h is None or eta_h <= 0 or eta_h > TRIGGER_MINUTES / 60:
+                continue
+            if m.get("teams") and any(
+                t.get("name") in ("TBD",) for t in m.get("teams")
+            ):
+                continue
+            if notified.get(mid):
+                continue
+            text = _format_starting_report(m)
+            if not text:
+                continue
+            notified[mid] = True
+            self._save_state()
+            await self._send(text)
+            logger.info("[vct_cn] 已播报开赛提醒 %s", mid)
+
+    async def _notify_live_scores(self, matches: list[dict]):
+        """进行中比赛的实时比分播报：总比分变化（任一图比分变化）时播报一次摘要。"""
+        for m in matches:
+            mid = m.get("match_id")
+            if not mid or m.get("status") not in ("Live", "LIVE"):
+                continue
+            if m.get("teams") and any(
+                t.get("name") in ("TBD",) for t in m.get("teams")
+            ):
+                continue
+            try:
+                det = fetch_match_details(mid)
+                games = det["games"]
+            except Exception as e:  # noqa: BLE001
+                logger.error("[vct_cn] 拉取进行中详情 %s 失败: %s", mid, e)
+                continue
+            if not any(not _game_done(g) and g.get("scores") for g in games):
+                continue
+            sig_parts = []
+            for g in games:
+                t1n, t2n = _teams2(g)
+                s1 = (g.get("scores") or {}).get(t1n, {}).get("total", 0)
+                s2 = (g.get("scores") or {}).get(t2n, {}).get("total", 0)
+                sig_parts.append(f"{g.get('game_id','')}:{s1}:{s2}")
+            sig = "|".join(sig_parts)
+            last = self._state.setdefault("live_scores", {}).get(mid)
+            if sig == last:
+                continue
+            self._state.setdefault("live_scores", {})[mid] = sig
+            self._save_state()
+            text = _format_live_score(m, games)
+            if text:
+                await self._send(text)
+                logger.info("[vct_cn] 已播报进行中比分 %s", mid)
 
     async def _auto_broadcast(self):
         try:
@@ -487,6 +634,8 @@ class VctCnPlugin(Star):
             return
         if not matches:
             return
+
+        await self._notify_starting(matches)
 
         # 1) 已结束但未播报的比赛（补发总结）
         boot = not self._state.get("initialized")
@@ -528,10 +677,10 @@ class VctCnPlugin(Star):
             except Exception as e:  # noqa: BLE001
                 logger.error("[vct_cn] 补发比赛结果 %s 失败: %s", mid, e)
 
-        # 2) 开赛在即的比赛：检测已结束的单图并逐图播报
+        # 2) 进行中/开赛在即的比赛：检测已结束的单图并逐图播报
         for m in matches:
             mid = m.get("match_id")
-            if not mid or m.get("status") != "Upcoming":
+            if not mid or m.get("status") not in ("Upcoming", "Live", "LIVE"):
                 continue
             eta = _eta_hours(m.get("eta"))
             if eta is None or eta > 24:
@@ -573,6 +722,9 @@ class VctCnPlugin(Star):
                     await self._send(text)
                     logger.info("[vct_cn] 已播报整场结果 %s", mid)
 
+        # 4) 进行中比赛的实时比分播报
+        await self._notify_live_scores(matches)
+
         logger.info("[vct_cn] 定时播报检查完成")
 
     # ---------- 手动命令 ----------
@@ -580,6 +732,11 @@ class VctCnPlugin(Star):
     async def vct_command(self, event: AstrMessageEvent):
         args = (event.message_str or "").strip().split()
         sub = args[1].lower() if len(args) > 1 else ""
+
+        # 刷新华发送事件缓存：任何 /vct 命令都会让当前会话具备自动播报能力（无需重新 bind）
+        cur_umo = event.unified_msg_origin or event.session_id or ""
+        if cur_umo and cur_umo in await self._target_sessions():
+            self._bound_events[cur_umo] = event
 
         if not sub:
             yield event.plain_result(_HELP_TEXT)
@@ -663,7 +820,7 @@ class VctCnPlugin(Star):
 
         snippet_games = games[:4]
         for g in snippet_games:
-            t1n, t2n = (g.get("teams") or ["", ""])[:2]
+            t1n, t2n = _teams2(g)
             s1 = (g.get("scores") or {}).get(t1n, {})
             s2 = (g.get("scores") or {}).get(t2n, {})
             lines.append("")
@@ -691,11 +848,11 @@ class VctCnPlugin(Star):
             self._bind_result = "无法获取当前会话 ID，绑定失败"
             return
         sessions = await self._target_sessions()
-        if session_id in sessions:
-            self._bind_result = f"当前会话已绑定播报: {session_id}"
-            return
-        sessions.append(session_id)
-        await self._set_target_sessions(sessions)
+        if session_id not in sessions:
+            sessions.append(session_id)
+            await self._set_target_sessions(sessions)
+        # 保存事件对象用于主动播报（事件来自该会话所属平台，发送可靠）
+        self._bound_events[session_id] = event
         self._bind_result = (
             f"绑定成功! 定时播报目标: {session_id}\n(每 "
             f"{self.config.get('poll_interval_min', 60)} 分钟检查一次)"
@@ -706,11 +863,13 @@ class VctCnPlugin(Star):
         sessions = await self._target_sessions()
         if not session_id:
             await self._set_target_sessions([])
+            self._bound_events.clear()
             self._bind_result = "无法获取当前会话，已清空全部播报目标"
             return
         if session_id in sessions:
             sessions.remove(session_id)
             await self._set_target_sessions(sessions)
+            self._bound_events.pop(session_id, None)
             self._bind_result = f"已取消播报: {session_id}"
             return
         self._bind_result = "当前会话不在播报目标中"
@@ -719,7 +878,7 @@ class VctCnPlugin(Star):
         today = [
             m
             for m in matches
-            if m.get("status") == "Upcoming"
+            if m.get("status") in ("Upcoming", "Live", "LIVE")
             and (h := _eta_hours(m.get("eta"))) is not None
             and h <= 24
         ]

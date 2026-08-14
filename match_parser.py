@@ -87,36 +87,57 @@ def parse_overview(html: str) -> list[dict]:
         )
         teams = []
         scores = {}
-        # 左队: <div class="team"> ... team-name ... mod-ct / mod-t
-        left = re.search(
-            r'<div class="team">.*?class="team-name">\s*([^<]+?)\s*<'
-            r'.*?<span class="mod-ct">(\d+)</span>\s*/\s*<span class="mod-t">(\d+)</span>',
-            b,
-            re.S,
+        # 仅取 header 区域（到轮次手走势图为止），避免跨界污染
+        hd = b[b.find("vm-stats-game-header") :]
+        r_idx = hd.find("vlr-rounds")
+        if r_idx != -1:
+            hd = hd[:r_idx]
+        mr_idx = hd.find('<div class="team mod-right">')
+
+        def _side(name_m, total_m, part, default_total=0):
+            """从队伍块提取 名称 + {ct,t,total}，不依赖 mod 先后顺序。"""
+            if not name_m:
+                return None
+            name = name_m.group(1).strip()
+            ct_m = re.search(r'<span class="mod-ct">(\d+)</span>', part)
+            t_m = re.search(r'<span class="mod-t">(\d+)</span>', part)
+            ct = int(ct_m.group(1)) if ct_m else 0
+            t = int(t_m.group(1)) if t_m else 0
+            if ct or t:
+                total = ct + t
+            else:
+                total = int(total_m.group(1)) if total_m else default_total
+            return name, {"ct": ct, "t": t, "total": total}
+
+        left_part = hd[:mr_idx] if mr_idx != -1 else hd
+        left = _side(
+            re.search(r'<div class="team-name">\s*([^<]+?)\s*<', left_part),
+            re.search(
+                r'<div class="score[^"]*"\s*style="[^"]*margin-right\s*:\s*12px[^"]*">\s*(\d+)',
+                left_part,
+            ),
+            left_part,
         )
         if left:
-            name = left.group(1).strip()
-            teams.append(name)
-            scores[name] = {
-                "ct": int(left.group(2)),
-                "t": int(left.group(3)),
-                "total": int(left.group(2)) + int(left.group(3)),
-            }
-        # 右队: <div class="team mod-right"> ... team-name ... mod-t / mod-ct
-        right = re.search(
-            r'<div class="team mod-right">.*?class="team-name">\s*([^<]+?)\s*<'
-            r'.*?<span class="mod-t">(\d+)</span>\s*/\s*<span class="mod-ct">(\d+)</span>',
-            b,
-            re.S,
-        )
-        if right:
-            name = right.group(1).strip()
-            teams.append(name)
-            scores[name] = {
-                "ct": int(right.group(3)),
-                "t": int(right.group(2)),
-                "total": int(right.group(2)) + int(right.group(3)),
-            }
+            teams.append(left[0])
+            scores[left[0]] = left[1]
+        if mr_idx != -1:
+            right_part = hd[mr_idx:]
+            right = _side(
+                re.search(
+                    r'<div class="team mod-right">.*?<div class="team-name">\s*([^<]+?)\s*<',
+                    right_part,
+                    re.S,
+                ),
+                re.search(
+                    r'<div class="score[^"]*"\s*style="[^"]*margin-left\s*:\s*8px[^"]*">\s*(\d+)',
+                    right_part,
+                ),
+                right_part,
+            )
+            if right:
+                teams.append(right[0])
+                scores[right[0]] = right[1]
         winner = ""
         if len(teams) == 2 and scores[teams[0]]["total"] != scores[teams[1]]["total"]:
             winner = max(teams, key=lambda t: scores[t]["total"])
