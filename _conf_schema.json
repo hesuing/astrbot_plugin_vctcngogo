@@ -1,0 +1,14 @@
+{
+  "target_sessions": {
+    "description": "定时播报的目标会话列表（格式如 qq/群号）。可用命令 /vct bind 动态添加，留空则仅手动查询。",
+    "type": "list",
+    "hint": "每个会话一行，如 qq/123456",
+    "default": []
+  },
+  "poll_interval_min": {
+    "description": "定时自动播报的检查间隔（分钟）。",
+    "type": "int",
+    "hint": "默认 60",
+    "default": 60
+  }
+}
