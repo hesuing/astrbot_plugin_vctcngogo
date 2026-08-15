@@ -4,6 +4,7 @@ import html as _html
 import json
 import os
 import re
+import time
 import urllib.request
 from datetime import datetime
 
@@ -16,9 +17,15 @@ from astrbot.core.message.message_event_result import MessageChain
 try:
     from .match_parser import fetch_match_details
     from .translations import _cn_agent
+    from .haojiao import fetch_matches as _hj_fetch_matches
+    from .haojiao import fetch_battle as _hj_fetch_battle
+    from .haojiao import to_plugin_match as _hj_to_match
 except ImportError:  # 本地直接运行 main.py 时退化为顶层导入
     from match_parser import fetch_match_details
     from translations import _cn_agent
+    from haojiao import fetch_matches as _hj_fetch_matches
+    from haojiao import fetch_battle as _hj_fetch_battle
+    from haojiao import to_plugin_match as _hj_to_match
 
 _MONTHS = {
     "January": 1, "February": 2, "March": 3, "April": 4, "May": 5, "June": 6,
@@ -45,17 +52,23 @@ _now = lambda: datetime.now()  # noqa: E731
 
 def _date_sort_key(date_str: str):
     m = re.match(r"([A-Z][a-z]+) (\d{1,2}), (\d{4})", date_str or "")
-    if not m:
-        return datetime(9999, 1, 1)
-    return datetime(int(m.group(3)), _MONTHS.get(m.group(1), 1), int(m.group(2)))
+    if m:
+        return datetime(int(m.group(3)), _MONTHS.get(m.group(1), 1), int(m.group(2)))
+    m2 = re.match(r"(\d{4})-(\d{2})-(\d{2})", date_str or "")
+    if m2:
+        return datetime(int(m2.group(1)), int(m2.group(2)), int(m2.group(3)))
+    return datetime(9999, 1, 1)
 
 
 def _cn_date(date_str: str) -> str:
     m = re.match(r"([A-Z][a-z]+) (\d{1,2}), (\d{4})", date_str or "")
-    if not m:
-        return date_str or ""
-    month, day, year = m.group(1), int(m.group(2)), int(m.group(3))
-    return f"{year}年{_MONTHS.get(month, 0)}月{day}日"
+    if m:
+        month, day, year = m.group(1), int(m.group(2)), int(m.group(3))
+        return f"{year}年{_MONTHS.get(month, 0)}月{day}日"
+    m2 = re.match(r"(\d{4})-(\d{2})-(\d{2})", date_str or "")
+    if m2:
+        return f"{int(m2.group(1))}年{int(m2.group(2))}月{int(m2.group(3))}日"
+    return date_str or ""
 
 
 def _clean(s: str) -> str:
@@ -65,9 +78,16 @@ def _clean(s: str) -> str:
 
 def _fetch_page(url: str) -> str:
     req = urllib.request.Request(url, headers=REQUEST_HEADERS)
-    with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as resp:
-        data = resp.read()
-    return data.decode("utf-8", errors="ignore")
+    last_err = None
+    for _ in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as resp:
+                data = resp.read()
+            return data.decode("utf-8", errors="ignore")
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            time.sleep(2)
+    raise last_err
 
 
 def parse_page(html: str) -> list[dict]:
@@ -148,6 +168,54 @@ def parse_page(html: str) -> list[dict]:
     return items
 
 
+def _fallback_haojiao_matches() -> list[dict]:
+    """vlr.gg 拉取失败时，从号角 HOJO 兜底赛程（前后各 3 天）。"""
+    import time as _time
+
+    now_ms = int(_time.time() * 1000)
+    items: list[dict] = []
+    for page in (1, 2, 3):
+        try:
+            res = _hj_fetch_matches(
+                start_ms=now_ms - 3 * 86400000,
+                end_ms=now_ms + 3 * 86400000,
+                page=page,
+                page_size=50,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error("[vct_cn] 号角赛程拉取失败: %s", e)
+            break
+        lst = res.get("list") or []
+        items.extend(lst)
+        if len(items) >= res.get("count", 0) or len(lst) < 50:
+            break
+    if not items:
+        raise RuntimeError("号角无赛程数据")
+    return [_hj_to_match(i, now_ms) for i in items]
+
+
+def _fetch_details_with_fallback(mid: str) -> dict:
+    """比赛详情：优先 vlr.gg，失败时用号角 HOJO 兜底（仅总比分）。"""
+    try:
+        return fetch_match_details(mid)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[vct_cn] vlr.gg 详情 %s 失败，切换号角: %s", mid, e)
+    data = _hj_fetch_battle(mid)
+    m = data.get("match") or {}
+    if not m:
+        raise RuntimeError(f"号角无比赛 {mid} 数据")
+    vs = m.get("versus_info") or {}
+    info = {
+        "match_id": mid,
+        "score": (
+            str(vs.get("main_score") or ""),
+            str(vs.get("guest_score") or ""),
+        ),
+        "header_note": m.get("schedule_name") or "",
+    }
+    return {"url_id": mid, "match_id": mid, "match_html": "", "info": info, "games": []}
+
+
 def _eta_hours(eta: str) -> float | None:
     """把 vlr 的相对时间(如 9h 30m / 2d 4h / 1mo)换算为小时数。"""
     if not eta:
@@ -199,10 +267,7 @@ def _team_display(name: str) -> str:
     entry = _TEAMS.get((name or "").strip())
     if not entry:
         return name or ""
-    short, full = entry
-    if short == full:
-        return full
-    return f"{short}（{full}）"
+    return entry[0]
 
 
 _SERIES_CN = {
@@ -273,12 +338,15 @@ def _fmt_match(match: dict) -> str:
     return line
 
 
+def _player_rank_key(p: dict):
+    r = p.get("rating") or 0
+    return r if r > 0 else (p.get("kills") or 0)
+
+
 def _game_players(game: dict) -> list:
     """按 rating 降序返回选手列表（含中文角色）；无 rating 时按击杀降序。"""
     ps = list(game.get("players") or [])
-    has_rating = any((p.get("rating") or 0) > 0 for p in ps)
-    key = (lambda p: p.get("rating", 0)) if has_rating else (lambda p: p.get("kills", 0))
-    ps.sort(key=key, reverse=True)
+    ps.sort(key=_player_rank_key, reverse=True)
     return ps
 
 
@@ -303,7 +371,7 @@ def _game_mvp(game: dict) -> dict | None:
 
 
 def _format_game_report(game: dict) -> str:
-    """单图播报：比分 + 双方半场 + MVP。"""
+    """单图播报：比分 + MVP。"""
     t1, t2 = game.get("teams") or ["", ""]
     s1 = (game.get("scores") or {}).get(t1) or {}
     s2 = (game.get("scores") or {}).get(t2) or {}
@@ -316,12 +384,10 @@ def _format_game_report(game: dict) -> str:
     mvp = _game_mvp(game)
     lines = [header]
     if s1 or s2:
-        halves = [
-            f"{_team_short(t1)} 上半场 {s1.get('ct',0)} 防守 / {s1.get('t',0)} 进攻",
-            f"{_team_short(t2)} 上半场 {s2.get('t',0)} 进攻 / {s2.get('ct',0)} 防守",
-        ]
-        lines.append("  " + halves[0])
-        lines.append("  " + halves[1])
+        lines.append(
+            f"  {_team_short(t1)} {s1.get('ct',0)}防/{s1.get('t',0)}攻 · "
+            f"{_team_short(t2)} {s2.get('ct',0)}防/{s2.get('t',0)}攻"
+        )
     if mvp:
         lines.append("")
         lines.append(f"本图 MVP: {_fmt_player_line(mvp)}")
@@ -514,7 +580,7 @@ class VctCnPlugin(Star):
             logger.error("[vct_cn] apscheduler 未安装，定时播报不可用")
             return
         self._scheduler = AsyncIOScheduler()
-        interval_sec = int(self.config.get("poll_interval_min", 60)) * 60
+        interval_sec = int(self.config.get("poll_interval_min", 30)) * 60
         self._scheduler.add_job(
             self._auto_broadcast,
             IntervalTrigger(seconds=interval_sec),
@@ -523,10 +589,20 @@ class VctCnPlugin(Star):
             max_instances=1,
             replace_existing=True,
         )
+        live_sec = int(self.config.get("live_poll_min", 5)) * 60
+        self._scheduler.add_job(
+            self._live_detail_tick,
+            IntervalTrigger(seconds=live_sec),
+            id="vct_cn_live_detail",
+            coalesce=True,
+            max_instances=1,
+            replace_existing=True,
+        )
         self._scheduler.start()
         logger.info(
-            "[vct_cn] 定时任务已启动，每 %d 分钟检查一次",
+            "[vct_cn] 定时任务已启动，每 %d 分钟常规检查，每 %d 分钟播报进行中详情",
             interval_sec // 60,
+            live_sec // 60,
         )
 
     async def _target_sessions(self) -> list[str]:
@@ -560,7 +636,7 @@ class VctCnPlugin(Star):
                 if event is not None:
                     await event.send(chain)
                 else:
-                    await self.context.send_message(session_id, text)
+                    await self.context.send_message(session_id, chain)
                 any_sent = True
             except Exception as e:  # noqa: BLE001
                 logger.error("[vct_cn] 播报到 %s 失败: %s", session_id, e)
@@ -590,8 +666,8 @@ class VctCnPlugin(Star):
             await self._send(text)
             logger.info("[vct_cn] 已播报开赛提醒 %s", mid)
 
-    async def _notify_live_scores(self, matches: list[dict]):
-        """进行中比赛的实时比分播报：总比分变化（任一图比分变化）时播报一次摘要。"""
+    async def _notify_live_detail(self, matches: list[dict]):
+        """比赛进行中：每轮检查输出一次比赛详情（/vct match 同款），比赛结束即停。"""
         for m in matches:
             mid = m.get("match_id")
             if not mid or m.get("status") not in ("Live", "LIVE"):
@@ -601,29 +677,34 @@ class VctCnPlugin(Star):
             ):
                 continue
             try:
-                det = fetch_match_details(mid)
+                det = _fetch_details_with_fallback(mid)
                 games = det["games"]
             except Exception as e:  # noqa: BLE001
                 logger.error("[vct_cn] 拉取进行中详情 %s 失败: %s", mid, e)
                 continue
-            if not any(not _game_done(g) and g.get("scores") for g in games):
+            if games and all(_game_done(g) for g in games):
+                continue  # 所有图已打完，停止实时播报
+            text = await self._render_match_detail(mid)
+            if not text or "失败" in text:
                 continue
-            sig_parts = []
-            for g in games:
-                t1n, t2n = _teams2(g)
-                s1 = (g.get("scores") or {}).get(t1n, {}).get("total", 0)
-                s2 = (g.get("scores") or {}).get(t2n, {}).get("total", 0)
-                sig_parts.append(f"{g.get('game_id','')}:{s1}:{s2}")
-            sig = "|".join(sig_parts)
-            last = self._state.setdefault("live_scores", {}).get(mid)
-            if sig == last:
-                continue
-            self._state.setdefault("live_scores", {})[mid] = sig
-            self._save_state()
-            text = _format_live_score(m, games)
-            if text:
-                await self._send(text)
-                logger.info("[vct_cn] 已播报进行中比分 %s", mid)
+            await self._send(text)
+            logger.info("[vct_cn] 已播报进行中详情 %s", mid)
+
+    async def _live_detail_tick(self):
+        """进行中比赛专属检查：每 5 分钟播报一次比赛详情，比赛结束即停。"""
+        try:
+            html = _fetch_page(EVENT_URL)
+            matches = parse_page(html)
+        except Exception as e:  # noqa: BLE001
+            logger.error("[vct_cn] 实时详情拉取失败: %s", e)
+            matches = []
+        if not matches:
+            try:
+                matches = _fallback_haojiao_matches()
+            except Exception as e:  # noqa: BLE001
+                logger.error("[vct_cn] 实时详情号角兜底失败: %s", e)
+                return
+        await self._notify_live_detail(matches)
 
     async def _auto_broadcast(self):
         try:
@@ -631,9 +712,14 @@ class VctCnPlugin(Star):
             matches = parse_page(html)
         except Exception as e:  # noqa: BLE001
             logger.error("[vct_cn] 自动拉取失败: %s", e)
-            return
+            matches = []
         if not matches:
-            return
+            try:
+                matches = _fallback_haojiao_matches()
+                logger.info("[vct_cn] vlr.gg 无数据，已切换号角兜底（%d 场）", len(matches))
+            except Exception as e:  # noqa: BLE001
+                logger.error("[vct_cn] 号角兜底失败: %s", e)
+                return
 
         await self._notify_starting(matches)
 
@@ -655,6 +741,9 @@ class VctCnPlugin(Star):
             mid = m.get("match_id")
             if not mid or m.get("status") != "Completed":
                 continue
+            if m.get("source") == "haojiao":
+                # 号角兜底数据不做历史结果补发，避免兜底时刷屏
+                continue
             if self._state.get("reported", {}).get(mid):
                 continue
             if m.get("teams") and any(
@@ -662,7 +751,7 @@ class VctCnPlugin(Star):
             ):
                 continue
             try:
-                det = fetch_match_details(mid)
+                det = _fetch_details_with_fallback(mid)
                 games = det["games"]
                 self._state.setdefault("reported", {})[mid] = True
                 self._state.setdefault("game_reported", {}).setdefault(mid, {})
@@ -682,15 +771,18 @@ class VctCnPlugin(Star):
             mid = m.get("match_id")
             if not mid or m.get("status") not in ("Upcoming", "Live", "LIVE"):
                 continue
-            eta = _eta_hours(m.get("eta"))
-            if eta is None or eta > 24:
-                continue
+            if m.get("source") == "haojiao":
+                continue  # 号角暂无每图数据，单图播报仅支持 vlr 来源
+            if m.get("status") == "Upcoming":
+                eta = _eta_hours(m.get("eta"))
+                if eta is None or eta > 24:
+                    continue
             if m.get("teams") and any(
                 t.get("name") in ("TBD",) for t in m.get("teams")
             ):
                 continue
             try:
-                det = fetch_match_details(mid)
+                det = _fetch_details_with_fallback(mid)
                 games = det["games"]
             except Exception as e:  # noqa: BLE001
                 logger.error("[vct_cn] 拉取比赛详情 %s 失败: %s", mid, e)
@@ -711,10 +803,16 @@ class VctCnPlugin(Star):
                 self._save_state()
                 await self._send(text)
                 logger.info("[vct_cn] 已播报单图结果 %s/%s", mid, g.get("game_id"))
-            # 3) 整场打完
-            if len(game_done_ids) >= _BO3_GAMES and not self._state.get(
-                "reported", {}
-            ).get(mid):
+            # 3) 整场打完：任一队赢满 BO 数（BO3 需同队赢 2 图）
+            wins: dict[str, int] = {}
+            for g in games:
+                w = g.get("winner")
+                if w:
+                    wins[w] = wins.get(w, 0) + 1
+            if (
+                max(wins.values(), default=0) >= _BO3_GAMES
+                and not self._state.get("reported", {}).get(mid)
+            ):
                 self._state.setdefault("reported", {})[mid] = True
                 self._save_state()
                 text = _format_final_report(m, games)
@@ -722,8 +820,7 @@ class VctCnPlugin(Star):
                     await self._send(text)
                     logger.info("[vct_cn] 已播报整场结果 %s", mid)
 
-        # 4) 进行中比赛的实时比分播报
-        await self._notify_live_scores(matches)
+        # 4) 进行中比赛的详情播报由独立任务 _live_detail_tick 每 5 分钟执行
 
         logger.info("[vct_cn] 定时播报检查完成")
 
@@ -772,8 +869,12 @@ class VctCnPlugin(Star):
         try:
             matches = parse_page(_fetch_page(EVENT_URL))
         except Exception as e:  # noqa: BLE001
-            yield event.plain_result(f"拉取失败: {e}")
-            return
+            try:
+                matches = _fallback_haojiao_matches()
+                logger.info("[vct_cn] 手动查询 vlr.gg 失败，已切换号角兜底")
+            except Exception as e2:  # noqa: BLE001
+                yield event.plain_result(f"拉取失败: {e}; 号角兜底失败: {e2}")
+                return
 
         if not matches:
             yield event.plain_result("未解析到任何比赛数据（页面结构可能已变化）")
@@ -800,7 +901,7 @@ class VctCnPlugin(Star):
         if not mid:
             return "用法: /vct match <比赛ID或 vlr.gg 链接>"
         try:
-            det = fetch_match_details(mid)
+            det = _fetch_details_with_fallback(mid)
             info = det["info"]
             games = det["games"]
         except Exception as e:  # noqa: BLE001
@@ -831,12 +932,26 @@ class VctCnPlugin(Star):
             )
             if s1 and s2:
                 lines.append(
-                    f"  {_team_short(t1n)} 上半场 {s1.get('ct',0)}防/{s1.get('t',0)}攻 · "
-                    f"{_team_short(t2n)} 上半场 {s2.get('t',0)}攻/{s2.get('ct',0)}防"
+                    f"  {_team_short(t1n)} {s1.get('ct',0)}防/{s1.get('t',0)}攻 · "
+                    f"{_team_short(t2n)} {s2.get('ct',0)}防/{s2.get('t',0)}攻"
                 )
-            ps = _game_players(g)
-            for i, p in enumerate(ps[:5]):
-                lines.append(f"  {i+1}. {_fmt_player_line(p)}")
+            raw_ps = g.get("players") or []
+            if raw_ps:
+                # 按 p["team"]（vlr.gg 的队伍 tag）分组，每名选手单独一行
+                from collections import defaultdict
+                grps = defaultdict(list)
+                for p in raw_ps:
+                    grps[p.get("team") or "?"].append(p)
+                for label in (_team_short(t1n), _team_short(t2n)):
+                    ps = sorted(grps.get(label, []), key=_player_rank_key, reverse=True)
+                    if ps:
+                        lines.append(f"  {label}")
+                        for p in ps:
+                            lines.append(f"    {_fmt_player_line(p)}")
+            else:
+                ps = _game_players(g)
+                for i, p in enumerate(ps[:5]):
+                    lines.append(f"  {i+1}. {_fmt_player_line(p)}")
             mvp = _game_mvp(g)
             if mvp:
                 lines.append(f"  MVP: {_fmt_player_line(mvp)}")
@@ -881,6 +996,10 @@ class VctCnPlugin(Star):
             if m.get("status") in ("Upcoming", "Live", "LIVE")
             and (h := _eta_hours(m.get("eta"))) is not None
             and h <= 24
+            and not (
+                m.get("teams")
+                and any(t.get("name") in ("TBD",) for t in m.get("teams"))
+            )
         ]
         if not today:
             return "24 小时内暂无 VCT CN 比赛"
@@ -900,12 +1019,23 @@ class VctCnPlugin(Star):
         lines = [f"{EVENT_NAME} · 全部赛程", ""]
         grouped: dict[str, list[dict]] = {}
         for m in matches:
-            grouped.setdefault(m.get("date") or "未定日期", []).append(m)
+            if not m.get("date"):
+                continue
+            grouped.setdefault(m.get("date"), []).append(m)
         for date, ms in sorted(grouped.items(), key=lambda kv: _date_sort_key(kv[0])):
+            valid = [
+                m
+                for m in ms
+                if m.get("status") != "Completed"
+                and not (
+                    m.get("teams")
+                    and any(t.get("name") in ("TBD",) for t in m.get("teams"))
+                )
+            ]
+            if not valid:
+                continue
             lines.append(f"■ {_cn_date(date)}")
-            for m in ms:
-                if m.get("status") == "Completed":
-                    continue
+            for m in valid:
                 line = _fmt_match(m)
                 if line:
                     lines.append("  " + line)
