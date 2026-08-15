@@ -103,10 +103,8 @@ def parse_overview(html: str) -> list[dict]:
             t_m = re.search(r'<span class="mod-t">(\d+)</span>', part)
             ct = int(ct_m.group(1)) if ct_m else 0
             t = int(t_m.group(1)) if t_m else 0
-            if ct or t:
-                total = ct + t
-            else:
-                total = int(total_m.group(1)) if total_m else default_total
+            # total 以 score div（总比分）为准；缺失时才退回 ct+t
+            total = int(total_m.group(1)) if total_m else (ct + t or default_total)
             return name, {"ct": ct, "t": t, "total": total}
 
         left_part = hd[:mr_idx] if mr_idx != -1 else hd
@@ -139,8 +137,12 @@ def parse_overview(html: str) -> list[dict]:
                 teams.append(right[0])
                 scores[right[0]] = right[1]
         winner = ""
-        if len(teams) == 2 and scores[teams[0]]["total"] != scores[teams[1]]["total"]:
-            winner = max(teams, key=lambda t: scores[t]["total"])
+        if len(teams) == 2:
+            s1 = scores[teams[0]]["total"]
+            s2 = scores[teams[1]]["total"]
+            # 一图结束需一方达到赛制胜分（13 分制，加时可能 >13）
+            if s1 != s2 and max(s1, s2) >= 13:
+                winner = max(teams, key=lambda t: scores[t]["total"])
         players_raw = re.findall(
             r'ovw-player-name text-of">\s*([^<]+?)\s*<[^>]*>'
             r'\s*<div class="ovw-player-tag ge-text-light">\s*([^<]+?)\s*<'
