@@ -1,7 +1,7 @@
-# astrbot_plugin_vctgogo
+# astrbot_plugin_vct_cn
 
-VCT CN（无畏契约中国赛区）比赛播报插件，适用于 [AstrBot]
-（本模块仅作为构思底子，无重大bug不会更新）
+VCT CN（无畏契约中国赛区）比赛播报插件，适用于 [AstrBot](https://astrbot.app/)。
+
 自动从 [vlr.gg](https://www.vlr.gg) 拉取 VCT 2026 中国赛区 Stage 2 的赛程、比分与选手数据，支持定时播报、手动查询、比赛详情（地图 / 半场比分 / 选手数据 / MVP）与实时监控。
 
 ## 功能
@@ -28,12 +28,12 @@ VCT CN（无畏契约中国赛区）比赛播报插件，适用于 [AstrBot]
 
 ```bash
 cd /AstrBot/data/plugins
-git clone https://github.com/hesuing/astrbot_plugin_vctcngogo
+git clone https://github.com/hesuing/astrbot_plugin_vctcngogo astrbot_plugin_vct_cn
 ```
 
 然后重启 AstrBot。
 
-> 注意：`astrbot_plugin_vctgogo` 文件夹整体即插件目录，请勿只把里面的文件散放进去。
+> 注意：`astrbot_plugin_vct_cn` 文件夹整体即插件目录，请勿只把里面的文件散放进去。
 
 无第三方依赖，仅使用 Python 标准库及 AstrBot 内置组件。
 
@@ -154,3 +154,19 @@ astrbot_plugin_vct_cn/
 ├── _conf_schema.json    # 插件配置项定义
 └── monitor_state.json   # 运行时状态（自动生成，勿手动改动）
 ```
+
+## 版本记录
+
+- **v1.2.0**
+  - 新增开赛提醒：临近开赛（60 分钟内）自动播报对阵 / 时间 / 阶段
+  - 新增进行中比赛实时比分播报：比分变化时推送总比分局数与每图比分
+  - 支持识别 LIVE 进行中比赛（赛程、详情、实时监控）
+  - 修复 LIVE 比赛单图 `teams` 缺队导致的崩溃，MVP / 选手排行改为无 Rating 时按击杀排序
+  - 修复进行中比赛详情页地图比分 / 半场解析错误
+  - 修复定时播报无法发送的问题：改为事件对象主动发送，任意 `/vct` 命令即可激活当前群的自动播报；启动时立即执行一次首检（不等待满一个间隔）
+  - 定时检查间隔默认改为 30 分钟
+- **v1.1.0**
+  - 新增 `/vct match` 比赛详情查询（地图、半场、选手数据、每图 MVP）
+  - 新增自动监控：逐图播报 + 整场总结（每图 MVP）
+  - 新增首次启动保护与状态持久化
+  - 修复 `/vct`（无参数）误返回今日赛程的问题，现返回指令帮助
